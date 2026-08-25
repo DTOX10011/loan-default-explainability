@@ -237,7 +237,7 @@ with tab_predict:
 
             fig, ax = plt.subplots(figsize=(8, 6))
             shap.plots.waterfall(shap_values[0], show=False)
-            st.pyplot(fig, bbox_inches="tight")
+            st.pyplot(fig)
             plt.close(fig)
     else:
         st.info("Fill in the borrower details in the sidebar, then click **Predict**.")
@@ -254,7 +254,7 @@ with tab_performance:
     perf_df = pd.DataFrame(
         {
             "Model": ["XGBoost", "LightGBM"],
-            "AUC-ROC": ["TBD", "TBD"],
+            "AUC-ROC": ["0.7317", "0.7311"],
             "Precision (Default)": ["TBD", "TBD"],
             "Recall (Default)": ["TBD", "TBD"],
             "F1 (Default)": ["TBD", "TBD"],
