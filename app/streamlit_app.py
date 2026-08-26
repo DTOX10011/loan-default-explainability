@@ -11,6 +11,7 @@ Run with:
 """
 
 import os
+import re
 
 import joblib
 import matplotlib.pyplot as plt
@@ -25,6 +26,9 @@ import streamlit as st
 st.set_page_config(page_title="Loan Default Risk Predictor", layout="wide")
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "xgb_model.pkl")
+BASELINE_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "models", "baseline_features.pkl"
+)
 RISK_THRESHOLD = 0.5
 
 EDUCATION_OPTIONS = [
@@ -44,6 +48,23 @@ def load_model():
     return joblib.load(MODEL_PATH)
 
 
+def _sanitize_column_name(name):
+    """Match the sanitization applied to one-hot column names at training
+    time (spaces, slashes, colons, commas, etc. all become underscores) so
+    baseline_features.pkl's raw category-text keys line up with the model's
+    actual (sanitized) feature names."""
+    return re.sub(r"[^0-9A-Za-z_]", "_", name)
+
+
+@st.cache_resource
+def load_baseline():
+    """Load per-feature baseline values (medians computed over low-risk,
+    TARGET=0 training rows) used to seed every prediction, so unmodeled
+    columns reflect a realistic borrower instead of zero."""
+    raw_baseline = joblib.load(BASELINE_PATH)
+    return {_sanitize_column_name(k): v for k, v in raw_baseline.items()}
+
+
 @st.cache_resource
 def load_explainer(_model):
     return shap.TreeExplainer(_model)
@@ -52,20 +73,28 @@ def load_explainer(_model):
 # ---------------------------------------------------------------------------
 # Feature construction
 # ---------------------------------------------------------------------------
-def build_feature_row(inputs, expected_columns):
+def build_feature_row(inputs, expected_columns, baseline):
     """Build a single-row DataFrame matching the model's expected features.
 
-    NOTE: This demo reconstructs a feature vector from the handful of
-    borrower inputs collected in the sidebar. The fully trained model
-    expects the complete set of engineered columns produced by
-    `notebooks/02_feature_engineering.ipynb` (including one-hot encoded
-    categoricals). This app doesn't have access to the exact fitted
-    encoders used at training time, so any expected column not covered
-    by a sidebar input is left at a neutral default (0). For a
-    production deployment, persist and reload the same encoders used
-    during training instead of reconstructing them here.
+    Starts from `baseline` — per-feature medians computed over low-risk
+    (TARGET=0) training rows, saved to `models/baseline_features.pkl` — so
+    every one of the model's ~189 features has a realistic value, not just
+    the handful of borrower inputs collected in the sidebar. Only the
+    columns the sidebar actually controls (loan amounts, age, tenure,
+    EXT_SOURCE scores, gender, car ownership, education, and the derived
+    ratio/aggregate features) are then overridden with the user's input.
+
+    NOTE: This app doesn't have access to the exact fitted encoders used
+    at training time, so any expected column not covered by a sidebar
+    input keeps its baseline (median) value rather than the user's intent.
+    For a production deployment, persist and reload the same encoders
+    used during training instead of reconstructing them here.
     """
-    row = pd.DataFrame(0, index=[0], columns=expected_columns, dtype=float)
+    row = pd.DataFrame([baseline], columns=expected_columns, dtype=float)
+    if row.isna().any(axis=None):
+        # Safety net only — baseline and model features are verified to
+        # match exactly; this guards against future drift between them.
+        row = row.fillna(0.0)
 
     direct_fields = {
         "AMT_CREDIT": inputs["amt_credit"],
@@ -90,19 +119,27 @@ def build_feature_row(inputs, expected_columns):
         if col in row.columns:
             row.at[0, col] = val
 
-    # One-hot encoded gender — model keeps CODE_GENDER_M (and CODE_GENDER_XNA,
-    # left at 0 here since the sidebar never offers that option); "Female" is
-    # the dropped baseline category, so it's correctly represented by leaving
-    # CODE_GENDER_M at 0.
+    # One-hot encoded gender — model keeps CODE_GENDER_M and CODE_GENDER_XNA.
+    # The sidebar only offers Male/Female, so both are set explicitly rather
+    # than left at their baseline values (which could otherwise disagree
+    # with the user's selection).
     if "CODE_GENDER_M" in row.columns:
         row.at[0, "CODE_GENDER_M"] = 1 if inputs["code_gender"] == "Male" else 0
+    if "CODE_GENDER_XNA" in row.columns:
+        row.at[0, "CODE_GENDER_XNA"] = 0
     if "FLAG_OWN_CAR" in row.columns:
         row.at[0, "FLAG_OWN_CAR"] = 1 if inputs["flag_own_car"] == "Yes" else 0
 
     # One-hot encoded education level — column names use underscores in place
     # of spaces/slashes (e.g. NAME_EDUCATION_TYPE_Secondary___secondary_special).
-    # "Academic_degree" is the dropped baseline category, so it has no matching
-    # column and is correctly represented by leaving all dummies at 0.
+    # Since the baseline row can have a *different* education dummy already
+    # set to 1, every education column must be zeroed first so only the
+    # user's selected category ends up flagged (mirrors real one-hot data,
+    # where exactly one dummy in the group is ever 1). "Academic_degree" is
+    # the dropped baseline category, so it has no matching column — selecting
+    # it is correctly represented by leaving every dummy at 0.
+    education_columns = [c for c in row.columns if c.startswith("NAME_EDUCATION_TYPE_")]
+    row.loc[0, education_columns] = 0
     education_col = f"NAME_EDUCATION_TYPE_{inputs['name_education_type']}"
     if education_col in row.columns:
         row.at[0, education_col] = 1
@@ -191,6 +228,16 @@ with tab_predict:
             )
             st.stop()
 
+        try:
+            baseline = load_baseline()
+        except FileNotFoundError:
+            st.error(
+                f"Could not find baseline feature values at `{BASELINE_PATH}`. "
+                "Generate it by computing per-feature medians over low-risk "
+                "(TARGET=0) rows of the processed training data."
+            )
+            st.stop()
+
         derived = compute_derived_features(
             amt_credit, amt_income_total, amt_annuity, amt_goods_price,
             ext_source_1, ext_source_2, ext_source_3,
@@ -214,7 +261,7 @@ with tab_predict:
 
         booster = model.get_booster()
         expected_columns = booster.feature_names
-        feature_row = build_feature_row(inputs, expected_columns)
+        feature_row = build_feature_row(inputs, expected_columns, baseline)
 
         risk_score = model.predict_proba(feature_row)[0, 1]
         is_high_risk = risk_score >= RISK_THRESHOLD
