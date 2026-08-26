@@ -28,11 +28,11 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "xgb_model.
 RISK_THRESHOLD = 0.5
 
 EDUCATION_OPTIONS = [
-    "Secondary / secondary special",
-    "Higher education",
-    "Incomplete higher",
-    "Lower secondary",
-    "Academic degree",
+    "Secondary___secondary_special",
+    "Higher_education",
+    "Incomplete_higher",
+    "Lower_secondary",
+    "Academic_degree",
 ]
 
 
@@ -90,13 +90,19 @@ def build_feature_row(inputs, expected_columns):
         if col in row.columns:
             row.at[0, col] = val
 
-    # Binary label-encoded fields (approximate mapping, see docstring above)
-    if "CODE_GENDER" in row.columns:
-        row.at[0, "CODE_GENDER"] = 1 if inputs["code_gender"] == "Male" else 0
+    # One-hot encoded gender — model keeps CODE_GENDER_M (and CODE_GENDER_XNA,
+    # left at 0 here since the sidebar never offers that option); "Female" is
+    # the dropped baseline category, so it's correctly represented by leaving
+    # CODE_GENDER_M at 0.
+    if "CODE_GENDER_M" in row.columns:
+        row.at[0, "CODE_GENDER_M"] = 1 if inputs["code_gender"] == "Male" else 0
     if "FLAG_OWN_CAR" in row.columns:
         row.at[0, "FLAG_OWN_CAR"] = 1 if inputs["flag_own_car"] == "Yes" else 0
 
-    # One-hot encoded education level — set the matching dummy column if present
+    # One-hot encoded education level — column names use underscores in place
+    # of spaces/slashes (e.g. NAME_EDUCATION_TYPE_Secondary___secondary_special).
+    # "Academic_degree" is the dropped baseline category, so it has no matching
+    # column and is correctly represented by leaving all dummies at 0.
     education_col = f"NAME_EDUCATION_TYPE_{inputs['name_education_type']}"
     if education_col in row.columns:
         row.at[0, education_col] = 1
